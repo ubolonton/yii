@@ -21,6 +21,8 @@
  */
 class CMssqlCommandBuilder extends CDbCommandBuilder
 {
+    private $_stringTypes = array('char', 'text', 'varchar', 'nchar', 'ntext', 'nvarchar');
+
 	/**
 	 * Creates a COUNT(*) command for a single table.
 	 * Override parent implementation to remove the order clause of criteria if it exists
@@ -48,6 +50,72 @@ class CMssqlCommandBuilder extends CDbCommandBuilder
 		$criteria=$this->checkCriteria($table,$criteria);
 		return parent::createFindCommand($table,$criteria,$alias);
 
+	}
+
+    /* TODO CDbCriteria also? */
+    public function quoteUnicodeString($value)
+    {
+        $quoted = $this->getDbConnection()->quoteValue($value);
+        if (gettype($quoted) === 'string')
+            return 'N'.$quoted;
+        else
+            return $quoted;
+    }
+
+	/**
+	 * Creates an INSERT command.
+	 * @param mixed $table the table schema ({@link CDbTableSchema}) or the table name (string).
+	 * @param array $data data to be inserted (column name=>column value). If a key is not a valid column name, the corresponding value will be ignored.
+	 * @return CDbCommand insert command
+	 */
+	public function createInsertCommand($table,$data)
+	{
+		$this->ensureTable($table);
+		$fields=array();
+		$values=array();
+		$placeholders=array();
+		$i=0;
+		foreach($data as $name=>$value)
+		{
+			if(($column=$table->getColumn($name))!==null && ($value!==null || $column->allowNull))
+			{
+				$fields[]=$column->rawName;
+				if($value instanceof CDbExpression)
+				{
+					$placeholders[]=$value->expression;
+					foreach($value->params as $n=>$v)
+						$values[$n]=$v;
+				}
+				else
+				{
+                    $casted = $column->typecast($value);
+                    if (in_array($column->dbType, $this->_stringTypes) && gettype($casted) === 'string')
+                        $placeholders[] = $this->quoteUnicodeString($casted);
+                    else
+                    {
+                        $placeholders[]=self::PARAM_PREFIX.$i;
+                        $values[self::PARAM_PREFIX.$i]=$casted;
+                        $i++;
+                    }
+				}
+			}
+		}
+		if($fields===array())
+		{
+			$pks=is_array($table->primaryKey) ? $table->primaryKey : array($table->primaryKey);
+			foreach($pks as $pk)
+			{
+				$fields[]=$table->getColumn($pk)->rawName;
+				$placeholders[]='NULL';
+			}
+		}
+		$sql="INSERT INTO {$table->rawName} (".implode(', ',$fields).') VALUES ('.implode(', ',$placeholders).')';
+		$command=$this->getDbConnection()->createCommand($sql);
+
+		foreach($values as $name=>$value)
+			$command->bindValue($name,$value);
+
+		return $command;
 	}
 
 	/**
@@ -79,14 +147,23 @@ class CMssqlCommandBuilder extends CDbCommandBuilder
 				}
 				else if($bindByPosition)
 				{
-					$fields[]=$column->rawName.'=?';
+                    if (in_array($column->dbType, $this->_stringTypes))
+                        $fields[]=$column->rawName.'=N?';
+                    else
+                        $fields[]=$column->rawName.'=?';
 					$values[]=$column->typecast($value);
 				}
 				else
 				{
-					$fields[]=$column->rawName.'='.self::PARAM_PREFIX.$i;
-					$values[self::PARAM_PREFIX.$i]=$column->typecast($value);
-					$i++;
+                    $casted = $column->typecast($value);
+                    if (in_array($column->dbType, $this->_stringTypes))
+                        $fields[]=$column->rawName."=".$this->quoteUnicodeString($casted);
+                    else
+                    {
+                        $fields[]=$column->rawName.'='.self::PARAM_PREFIX.$i;
+                        $values[self::PARAM_PREFIX.$i]=$casted;
+                        $i++;
+                    }
 				}
 			}
 		}
